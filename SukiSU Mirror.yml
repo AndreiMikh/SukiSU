@@ -1,0 +1,103 @@
+# Mirror SukiSU (Self-Hosted Forgejo/Gitea) To GitHub
+name: 🪞 Mirror SukiSU To GitHub
+
+on:
+  # Run Automatically Every 6 Hours
+  schedule:
+    - cron: "0 */6 * * *"
+  # Allow Manual Runs From The Actions Tab
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: Source Repository URL (Self-Hosted)
+        required: false
+        default: "https://git.zako.shirkneko.top:20004/shirkneko/SukiSU"
+      target_repo:
+        description: Target GitHub Repository (owner/repo) - Overrides MIRROR_TARGET Variable
+        required: false
+        default: ""
+      insecure_tls:
+        description: Skip TLS Certificate Check (Only For Self-Signed Certificates)
+        type: boolean
+        required: false
+        default: false
+
+# Never Run Two Mirror Jobs At Once
+concurrency:
+  group: mirror-sukisu
+  cancel-in-progress: false
+
+# This Workflow Does Not Need Access To This Repository's Contents
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    name: 🪞 Mirror Branches And Tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 🪞 Mirror Repository
+        shell: bash
+        env:
+          # Personal Access Token Of The Mirror Target (Repository Secret: MIRROR_TOKEN)
+          # Needs "repo" Scope (Plus "workflow" Scope If The Source Contains .github/workflows)
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+          # Target Repository: Manual Input First, Then Repository Variable MIRROR_TARGET
+          TARGET_REPO: ${{ inputs.target_repo || vars.MIRROR_TARGET }}
+          # Source Repository: Manual Input First, Then The Default Below
+          SOURCE_URL: ${{ inputs.source_url || 'https://git.zako.shirkneko.top:20004/shirkneko/SukiSU' }}
+          INSECURE_TLS: ${{ inputs.insecure_tls || 'false' }}
+        run: |
+          set -Eeuo pipefail
+          # Validate Required Configuration
+          if [[ -z "${MIRROR_TOKEN:-}" ]]; then
+            echo "└─ [Warn] ⚠️ Secret MIRROR_TOKEN Is Missing"
+            exit 1
+          fi
+          if [[ ! "${TARGET_REPO:-}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "└─ [Warn] ⚠️ Target Must Look Like owner/repo : ${TARGET_REPO:-Missing}"
+            echo "└─ [Info] Set Repository Variable MIRROR_TARGET Or Use The target_repo Input"
+            exit 1
+          fi
+          # Allow Self-Signed Certificates On The Source Server When Requested
+          if [[ "$INSECURE_TLS" == "true" ]]; then
+            export GIT_SSL_NO_VERIFY=true
+            echo "└─ [Warn] ⚠️ TLS Verification Disabled For This Run"
+          fi
+          echo "└─ [Info] 🔗 Source : $SOURCE_URL"
+          echo "└─ [Info] 🎯 Target : https://github.com/$TARGET_REPO"
+          # Send The Token Only To GitHub, Via A Header (Never In The URL Or Logs)
+          AUTH="$(printf 'x-access-token:%s' "$MIRROR_TOKEN" | base64 -w0)"
+          echo "::add-mask::$AUTH"
+          # Clone Every Branch And Tag From The Source (No Credentials Sent To Source)
+          WORK="${RUNNER_TEMP}/mirror"
+          rm -rf "$WORK"
+          echo "└─ [Info] 📥 Cloning Source..."
+          git clone --mirror --quiet "$SOURCE_URL" "$WORK"
+          cd "$WORK"
+          # Safety Check: Never Prune The Target If The Source Looks Empty
+          BRANCHCOUNT="$(git for-each-ref --count=1000 refs/heads | wc -l)"
+          TAGCOUNT="$(git for-each-ref --count=10000 refs/tags | wc -l)"
+          echo "└─ [Info] 🌿 Branches : $BRANCHCOUNT"
+          echo "└─ [Info] 🏷️ Tags     : $TAGCOUNT"
+          if [[ "$BRANCHCOUNT" -eq 0 ]]; then
+            echo "└─ [Warn] ⚠️ Source Has No Branches, Aborting To Protect Target"
+            exit 1
+          fi
+          # Push Only Branches And Tags (Skips Forgejo refs/pull/*, Which GitHub Rejects)
+          # "+" Forces Updates, "--prune" Removes Branches / Tags Deleted At The Source
+          echo "└─ [Info] 📤 Pushing To GitHub..."
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" \
+            push --prune "https://github.com/${TARGET_REPO}.git" \
+              "+refs/heads/*:refs/heads/*" \
+              "+refs/tags/*:refs/tags/*"
+          # Report Result
+          echo "└─ [Info] 🎉 Mirror Complete"
+          {
+            echo "### 🪞 Mirror Complete"
+            echo "- Source: \`$SOURCE_URL\`"
+            echo "- Target: \`$TARGET_REPO\`"
+            echo "- Branches: $BRANCHCOUNT"
+            echo "- Tags: $TAGCOUNT"
+          } >> "$GITHUB_STEP_SUMMARY"
